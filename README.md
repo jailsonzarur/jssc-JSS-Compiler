@@ -1,6 +1,10 @@
-# Compilador JSS — Análise Léxica
+# Compilador JSS — Análise Léxica e Sintática
 
-Analisador léxico (lexer) para a linguagem **JSS (JavaScript Simplificado)**, desenvolvido em Python puro, sem bibliotecas externas.
+Compilador para a linguagem **JSS (JavaScript Simplificado)**, desenvolvido em Python puro, sem bibliotecas externas.
+
+Etapas implementadas:
+- **Fase 1 — Análise Léxica (Lexer):** tokenização completa da linguagem
+- **Fase 2 — Análise Sintática (Parser):** construção da AST via descida recursiva
 
 ## Pré-requisitos
 
@@ -22,35 +26,53 @@ Ou lendo da entrada padrão:
 python3 main.py < arquivo.jss
 ```
 
-## Exemplos
-
-### Programa válido
-
-```bash
-python3 main.py exemplos/fatorial.jss
+Em caso de **sucesso**, exibe:
+```
+Análise léxica e sintática concluída sem erros.
 ```
 
-Saída (lista de tokens com tipo, valor e linha):
-```
-Token(FUNCTION, 'function', line=1)
-Token(INT, 'int', line=1)
-Token(IDENT, 'fatorial', line=1)
-...
-Análise léxica concluída sem erros.
-```
-
-### Programa com erro léxico
-
-```bash
-python3 main.py exemplos/erro_lexico.jss
-```
-
-Saída:
+Em caso de **erro**, exibe a mensagem com o número da linha e encerra com código `1`:
 ```
 Erro léxico na linha 3: Caractere não reconhecido: '@'
+Erro sintático na linha 4: esperado ';', encontrado 'console'
 ```
 
-O compilador encerra com código de saída `1` em caso de erro e `0` em caso de sucesso.
+## Flags opcionais
+
+| Flag | Descrição |
+|------|-----------|
+| `--tokens` | Executa apenas a análise léxica e imprime a lista de tokens |
+| `--ast` | Imprime a Árvore Sintática Abstrata (AST) completa |
+
+### Exemplos
+
+```bash
+# Programa válido — confirmação de sucesso
+python3 main.py exemplos/fatorial.jss
+
+# Programa válido — exibe a AST
+python3 main.py --ast exemplos/fatorial.jss
+
+# Apenas tokens
+python3 main.py --tokens exemplos/media.jss
+
+# Erro léxico (caractere '@' inválido)
+python3 main.py exemplos/erro_lexico.jss
+
+# Erro sintático (';' faltando)
+python3 main.py exemplos/erro_sintatico.jss
+```
+
+## Exemplos de programas
+
+| Arquivo | Descrição |
+|---------|-----------|
+| `exemplos/fatorial.jss` | Função recursiva de fatorial |
+| `exemplos/media.jss` | Média entre dois valores reais |
+| `exemplos/vetores.jss` | Declaração e acesso a arrays |
+| `exemplos/erro_lexico.jss` | Erro: caractere `@` não reconhecido |
+| `exemplos/erro_sintatico.jss` | Erro: `;` ausente após declaração |
+| `exemplos/erro_semantico.jss` | Atribuição a constante (detectado na análise semântica) |
 
 ## Regras léxicas implementadas
 
@@ -71,3 +93,56 @@ O compilador encerra com código de saída `1` em caso de erro e `0` em caso de 
 | Erro | Qualquer caractere não reconhecido | `@`, `#`, `$` |
 
 A linguagem é **case-sensitive**: `var`, `VAR` e `VaR` são identificadores distintos.
+
+## Regras sintáticas implementadas
+
+O parser utiliza **descida recursiva** e constrói uma AST (Árvore Sintática Abstrata).
+
+### Estrutura de um programa
+
+Um programa JSS é composto por zero ou mais declarações globais (variáveis, constantes, funções e classes). A função `main` é facultativa.
+
+### Declarações suportadas
+
+| Construção | Sintaxe |
+|---|---|
+| Função | `function <tipo> <nome>(<params>) { ... }` |
+| Variável simples | `let int x;` / `let int x = 10;` |
+| Múltiplas variáveis | `let int n1, n2;` |
+| Array | `let int[3] nums = [1, 2, 3];` |
+| Constante | `const real pi = 3.14;` |
+| Classe | `class Ponto { int x; Ponto constructor(...) { } int soma() { } }` |
+
+### Comandos de controle
+
+| Comando | Sintaxe |
+|---|---|
+| Condicional | `if (cond) { } else if (cond) { } else { }` |
+| Laço while | `while (cond) { }` |
+| Laço for | `for (expr; cond; expr) { }` |
+| Retorno | `return expr;` |
+| Break | `break;` |
+
+### Operadores (precedência — 1 é a mais alta)
+
+| Nível | Operadores | Associatividade |
+|-------|-----------|----------------|
+| 1 | `!` `+` `-` `++` `--` (prefixo) | — |
+| 2 | `**` | Direita |
+| 3 | `*` `/` `%` | Esquerda |
+| 4 | `+` `-` | Esquerda |
+| 5 | `>` `>=` `<` `<=` `==` `!=` | Esquerda |
+| 6 | `&&` | Esquerda |
+| 7 | `\|\|` | Esquerda |
+| 8 | `=` `+=` `-=` `*=` `/=` `%=` | Direita |
+
+### Funções nativas
+
+| Função | Descrição |
+|--------|-----------|
+| `input(var1, var2, ...)` | Lê valores do teclado |
+| `console.log(expr1, expr2, ...)` | Imprime no console |
+| `int(expr)` | Cast para inteiro |
+| `real(expr)` | Cast para real |
+| `str(expr)` | Cast para string |
+| `bool(expr)` | Cast para booleano |
