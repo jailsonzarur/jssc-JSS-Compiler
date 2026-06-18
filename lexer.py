@@ -11,8 +11,7 @@ Regras léxicas implementadas:
   - Espaços/quebras de linha descartados (linha rastreada para mensagens de erro)
 """
 
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Optional
 
@@ -79,12 +78,12 @@ class TT(Enum):
     OR        = auto()   # ||
 
     # Atribuição simples e composta
-    ASSIGN        = auto()   # =
-    PLUS_ASSIGN   = auto()   # +=
-    MINUS_ASSIGN  = auto()   # -=
-    STAR_ASSIGN   = auto()   # *=
-    SLASH_ASSIGN  = auto()   # /=
-    PERCENT_ASSIGN= auto()   # %=
+    ASSIGN         = auto()   # =
+    PLUS_ASSIGN    = auto()   # +=
+    MINUS_ASSIGN   = auto()   # -=
+    STAR_ASSIGN    = auto()   # *=
+    SLASH_ASSIGN   = auto()   # /=
+    PERCENT_ASSIGN = auto()   # %=
 
     # Delimitadores
     LBRACE    = auto()   # {
@@ -126,7 +125,7 @@ class LexError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Mapeamento de palavras reservadas
+# Palavras reservadas
 # ---------------------------------------------------------------------------
 
 KEYWORDS: dict[str, TT] = {
@@ -156,150 +155,12 @@ KEYWORDS: dict[str, TT] = {
 
 
 # ---------------------------------------------------------------------------
-# Padrões léxicos (ordem importa!)
-# ---------------------------------------------------------------------------
-
-_TOKEN_PATTERNS = [
-    # comentário de linha – descartado
-    ("COMMENT",    r"//[^\n]*"),
-    # espaço + nova linha – rastrear linha
-    ("NEWLINE",    r"\n"),
-    ("WHITESPACE", r"[ \t\r]+"),
-
-    # literais de string (com escapes \n \t \\ \" etc.)
-    ("STR_LIT",    r'"(?:[^"\\]|\\.)*"'),
-
-    # literais numéricos  (real antes de int para evitar engolir só a parte inteira)
-    ("REAL_LIT",   r"[0-9]+(?:\.[0-9]+)?(?:[Ee][+-]?[0-9]+)"),  # com expoente
-    ("REAL_LIT2",  r"[0-9]+\.[0-9]+"),                            # sem expoente
-    ("INT_LIT",    r"[0-9]+"),
-
-    # operadores de 2+ caracteres (antes dos de 1 char)
-    ("POWER",          r"\*\*"),
-    ("INC",            r"\+\+"),
-    ("DEC",            r"--"),
-    ("PLUS_ASSIGN",    r"\+="),
-    ("MINUS_ASSIGN",   r"-="),
-    ("STAR_ASSIGN",    r"\*="),
-    ("SLASH_ASSIGN",   r"/="),
-    ("PERCENT_ASSIGN", r"%="),
-    ("EQ",             r"=="),
-    ("NEQ",            r"!="),
-    ("LTE",            r"<="),
-    ("GTE",            r">="),
-    ("AND",            r"&&"),
-    ("OR",             r"\|\|"),
-
-    # operadores de 1 char
-    ("PLUS",      r"\+"),
-    ("MINUS",     r"-"),
-    ("STAR",      r"\*"),
-    ("SLASH",     r"/"),
-    ("PERCENT",   r"%"),
-    ("BANG",      r"!"),
-    ("LT",        r"<"),
-    ("GT",        r">"),
-    ("ASSIGN",    r"="),
-
-    # delimitadores
-    ("LBRACE",    r"\{"),
-    ("RBRACE",    r"\}"),
-    ("LPAREN",    r"\("),
-    ("RPAREN",    r"\)"),
-    ("LBRACKET",  r"\["),
-    ("RBRACKET",  r"\]"),
-    ("COMMA",     r","),
-    ("SEMICOLON", r";"),
-    ("DOT",       r"\."),
-
-    # identificadores / palavras reservadas
-    ("IDENT",     r"[a-zA-Z_][a-zA-Z0-9_]*"),
-
-    # qualquer coisa não reconhecida
-    ("UNKNOWN",   r"."),
-]
-
-# Compila o mega-regex com grupos nomeados
-_MASTER_RE = re.compile(
-    "|".join(f"(?P<{name}>{pat})" for name, pat in _TOKEN_PATTERNS),
-    re.DOTALL,
-)
-
-# Mapeia nome de grupo → TT (os descartáveis ficam como None)
-_GROUP_TO_TT: dict[str, Optional[TT]] = {
-    "COMMENT":         None,
-    "NEWLINE":         None,
-    "WHITESPACE":      None,
-    "STR_LIT":         TT.STR_LIT,
-    "REAL_LIT":        TT.REAL_LIT,
-    "REAL_LIT2":       TT.REAL_LIT,
-    "INT_LIT":         TT.INT_LIT,
-    "POWER":           TT.POWER,
-    "INC":             TT.INC,
-    "DEC":             TT.DEC,
-    "PLUS_ASSIGN":     TT.PLUS_ASSIGN,
-    "MINUS_ASSIGN":    TT.MINUS_ASSIGN,
-    "STAR_ASSIGN":     TT.STAR_ASSIGN,
-    "SLASH_ASSIGN":    TT.SLASH_ASSIGN,
-    "PERCENT_ASSIGN":  TT.PERCENT_ASSIGN,
-    "EQ":              TT.EQ,
-    "NEQ":             TT.NEQ,
-    "LTE":             TT.LTE,
-    "GTE":             TT.GTE,
-    "AND":             TT.AND,
-    "OR":              TT.OR,
-    "PLUS":            TT.PLUS,
-    "MINUS":           TT.MINUS,
-    "STAR":            TT.STAR,
-    "SLASH":           TT.SLASH,
-    "PERCENT":         TT.PERCENT,
-    "BANG":            TT.BANG,
-    "LT":              TT.LT,
-    "GT":              TT.GT,
-    "ASSIGN":          TT.ASSIGN,
-    "LBRACE":          TT.LBRACE,
-    "RBRACE":          TT.RBRACE,
-    "LPAREN":          TT.LPAREN,
-    "RPAREN":          TT.RPAREN,
-    "LBRACKET":        TT.LBRACKET,
-    "RBRACKET":        TT.RBRACKET,
-    "COMMA":           TT.COMMA,
-    "SEMICOLON":       TT.SEMICOLON,
-    "DOT":             TT.DOT,
-    "IDENT":           TT.IDENT,
-    "UNKNOWN":         None,   # vai gerar LexError
-}
-
-
-# ---------------------------------------------------------------------------
-# Conversores de valor bruto → valor Python tipado
-# ---------------------------------------------------------------------------
-
-def _parse_string(raw: str) -> str:
-    """Remove aspas e processa escapes."""
-    inner = raw[1:-1]
-    return bytes(inner, "utf-8").decode("unicode_escape")
-
-
-def _parse_real(raw: str) -> float:
-    return float(raw)
-
-
-def _parse_int(raw: str) -> int:
-    return int(raw)
-
-
-def _parse_bool(raw: str) -> bool:
-    return raw == "true"
-
-
-# ---------------------------------------------------------------------------
 # Lexer
 # ---------------------------------------------------------------------------
 
 class Lexer:
     """
-    Tokeniza o código-fonte JSS.
+    Tokeniza o código-fonte JSS caractere por caractere.
 
     Uso:
         lexer = Lexer(source_code)
@@ -308,50 +169,174 @@ class Lexer:
 
     def __init__(self, source: str):
         self._source = source
+        self._pos    = 0
+        self._line   = 1
+        self._tokens: list[Token] = []
+
+    # ── utilitários de leitura ──────────────────────────────────────────────
+
+    def _char(self) -> Optional[str]:
+        """Retorna o caractere atual ou None se chegou ao fim."""
+        if self._pos < len(self._source):
+            return self._source[self._pos]
+        return None
+
+    def _next(self) -> Optional[str]:
+        """Retorna o próximo caractere (lookahead de 1) ou None."""
+        if self._pos + 1 < len(self._source):
+            return self._source[self._pos + 1]
+        return None
+
+    def _advance(self) -> str:
+        """Consome o caractere atual e avança o dedo."""
+        char = self._source[self._pos]
+        self._pos += 1
+        return char
+
+    def _add(self, tipo: TT, valor: object):
+        """Adiciona um token na lista."""
+        self._tokens.append(Token(tipo, valor, self._line))
+
+    # ── tokenizador principal ───────────────────────────────────────────────
 
     def tokenize(self) -> list[Token]:
-        tokens: list[Token] = []
-        line = 1
+        while self._char() is not None:
+            c = self._char()
 
-        for m in _MASTER_RE.finditer(self._source):
-            kind = m.lastgroup
-            raw  = m.group()
+            # ── espaço / tab ──────────────────────────────────────────
+            if c in (' ', '\t', '\r'):
+                self._advance()
 
-            if kind == "NEWLINE":
-                line += 1
-                continue
+            # ── nova linha ────────────────────────────────────────────
+            elif c == '\n':
+                self._line += 1
+                self._advance()
 
-            if kind in ("COMMENT", "WHITESPACE"):
-                continue
+            # ── comentário (//) ───────────────────────────────────────
+            elif c == '/' and self._next() == '/':
+                while self._char() is not None and self._char() != '\n':
+                    self._advance()
 
-            if kind == "UNKNOWN":
-                raise LexError(f"Caractere não reconhecido: {raw!r}", line)
+            # ── string ────────────────────────────────────────────────
+            elif c == '"':
+                self._ler_string()
 
-            tt = _GROUP_TO_TT[kind]
+            # ── número (inteiro ou real) ──────────────────────────────
+            elif c.isdigit():
+                self._ler_numero()
 
-            # Converte valor
-            if tt == TT.INT_LIT:
-                value = _parse_int(raw)
-            elif tt == TT.REAL_LIT:
-                value = _parse_real(raw)
-            elif tt == TT.STR_LIT:
-                value = _parse_string(raw)
-            elif kind == "IDENT":
-                # Verifica se é palavra reservada
-                kw = KEYWORDS.get(raw)
-                if kw is not None:
-                    tt = kw
-                    value = raw if tt == TT.BOOL_LIT else raw
-                else:
-                    value = raw
+            # ── identificador ou palavra reservada ────────────────────
+            elif c.isalpha() or c == '_':
+                self._ler_identificador()
+
+            # ── operadores e delimitadores ────────────────────────────
             else:
-                value = raw
+                self._ler_operador()
 
-            # BOOL_LIT: converte "true"/"false" → bool Python
-            if tt == TT.BOOL_LIT:
-                value = _parse_bool(raw)
+        self._tokens.append(Token(TT.EOF, None, self._line))
+        return self._tokens
 
-            tokens.append(Token(tt, value, line))
+    # ── leitores específicos ────────────────────────────────────────────────
 
-        tokens.append(Token(TT.EOF, None, line))
-        return tokens
+    def _ler_string(self):
+        self._advance()   # pula a aspa de abertura "
+        texto = ""
+        while self._char() is not None and self._char() != '"':
+            if self._char() == '\\':
+                self._advance()   # pula a barra
+                escape = self._advance()
+                # converte o escape para o caractere real
+                texto += {'n': '\n', 't': '\t', '\\': '\\', '"': '"'}.get(escape, escape)
+            else:
+                texto += self._advance()
+
+        if self._char() is None:
+            raise LexError("String não fechada", self._line)
+
+        self._advance()   # pula a aspa de fechamento "
+        self._add(TT.STR_LIT, texto)
+
+    def _ler_numero(self):
+        numero = ""
+        while self._char() is not None and self._char().isdigit():
+            numero += self._advance()
+
+        # tem ponto decimal? é real
+        if self._char() == '.' and self._next() is not None and self._next().isdigit():
+            numero += self._advance()   # pula o ponto
+            while self._char() is not None and self._char().isdigit():
+                numero += self._advance()
+
+            # tem expoente? ex: 2.5E3 ou 1.0e-2
+            if self._char() in ('E', 'e'):
+                numero += self._advance()   # pula o E
+                if self._char() in ('+', '-'):
+                    numero += self._advance()
+                while self._char() is not None and self._char().isdigit():
+                    numero += self._advance()
+
+            self._add(TT.REAL_LIT, float(numero))
+        else:
+            self._add(TT.INT_LIT, int(numero))
+
+    def _ler_identificador(self):
+        palavra = ""
+        while self._char() is not None and (self._char().isalnum() or self._char() == '_'):
+            palavra += self._advance()
+
+        # verifica se é palavra reservada
+        tipo = KEYWORDS.get(palavra, TT.IDENT)
+
+        # booleanos viram valor Python bool
+        if tipo == TT.BOOL_LIT:
+            self._add(TT.BOOL_LIT, palavra == "true")
+        else:
+            self._add(tipo, palavra)
+
+    def _ler_operador(self):
+        c    = self._char()
+        prox = self._next()
+
+        # ── operadores de 2 caracteres ────────────────────────────────
+        dois = (c or "") + (prox or "")
+
+        if dois == '**': self._advance(); self._advance(); self._add(TT.POWER,          '**')
+        elif dois == '++': self._advance(); self._advance(); self._add(TT.INC,           '++')
+        elif dois == '--': self._advance(); self._advance(); self._add(TT.DEC,           '--')
+        elif dois == '+=': self._advance(); self._advance(); self._add(TT.PLUS_ASSIGN,   '+=')
+        elif dois == '-=': self._advance(); self._advance(); self._add(TT.MINUS_ASSIGN,  '-=')
+        elif dois == '*=': self._advance(); self._advance(); self._add(TT.STAR_ASSIGN,   '*=')
+        elif dois == '/=': self._advance(); self._advance(); self._add(TT.SLASH_ASSIGN,  '/=')
+        elif dois == '%=': self._advance(); self._advance(); self._add(TT.PERCENT_ASSIGN,'%=')
+        elif dois == '==': self._advance(); self._advance(); self._add(TT.EQ,            '==')
+        elif dois == '!=': self._advance(); self._advance(); self._add(TT.NEQ,           '!=')
+        elif dois == '<=': self._advance(); self._advance(); self._add(TT.LTE,           '<=')
+        elif dois == '>=': self._advance(); self._advance(); self._add(TT.GTE,           '>=')
+        elif dois == '&&': self._advance(); self._advance(); self._add(TT.AND,           '&&')
+        elif dois == '||': self._advance(); self._advance(); self._add(TT.OR,            '||')
+
+        # ── operadores de 1 caractere ─────────────────────────────────
+        elif c == '+': self._advance(); self._add(TT.PLUS,      '+')
+        elif c == '-': self._advance(); self._add(TT.MINUS,     '-')
+        elif c == '*': self._advance(); self._add(TT.STAR,      '*')
+        elif c == '/': self._advance(); self._add(TT.SLASH,     '/')
+        elif c == '%': self._advance(); self._add(TT.PERCENT,   '%')
+        elif c == '!': self._advance(); self._add(TT.BANG,      '!')
+        elif c == '<': self._advance(); self._add(TT.LT,        '<')
+        elif c == '>': self._advance(); self._add(TT.GT,        '>')
+        elif c == '=': self._advance(); self._add(TT.ASSIGN,    '=')
+
+        # ── delimitadores ─────────────────────────────────────────────
+        elif c == '{': self._advance(); self._add(TT.LBRACE,    '{')
+        elif c == '}': self._advance(); self._add(TT.RBRACE,    '}')
+        elif c == '(': self._advance(); self._add(TT.LPAREN,    '(')
+        elif c == ')': self._advance(); self._add(TT.RPAREN,    ')')
+        elif c == '[': self._advance(); self._add(TT.LBRACKET,  '[')
+        elif c == ']': self._advance(); self._add(TT.RBRACKET,  ']')
+        elif c == ',': self._advance(); self._add(TT.COMMA,     ',')
+        elif c == ';': self._advance(); self._add(TT.SEMICOLON, ';')
+        elif c == '.': self._advance(); self._add(TT.DOT,       '.')
+
+        # ── caractere desconhecido ────────────────────────────────────
+        else:
+            raise LexError(f"Caractere não reconhecido: {c!r}", self._line)
