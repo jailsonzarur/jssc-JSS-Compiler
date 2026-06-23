@@ -1,48 +1,25 @@
 """
-Analisador Sintático (Parser) para a linguagem JSS.
+Analisador Sintático (Parser) para a linguagem JSS usando ANTLR4.
 
-Gramática (descendente recursivo — EBNF):
-  program         → top_decl* EOF
-  top_decl        → function_decl | class_decl | var_decl | const_decl
-  function_decl   → "function" type IDENT "(" params? ")" block
-  class_decl      → "class" IDENT "{" class_member* "}"
-  class_member    → constructor_decl | method_decl | attr_decl
-  constructor_decl→ IDENT "constructor" "(" params? ")" block
-  method_decl     → type IDENT "(" params? ")" block
-  attr_decl       → type IDENT ";"
-  params          → param ("," param)*
-  param           → type IDENT
-  type            → "int" | "real" | "str" | "bool" | "void"
-  block           → "{" statement* "}"
-  statement       → var_decl | const_decl | return_stmt | if_stmt
-                  | while_stmt | for_stmt | break_stmt | expr_stmt
-  var_decl        → "let" type ("[" INT_LIT "]")? declarator ("," declarator)* ";"
-  declarator      → IDENT ("=" expr)?
-  const_decl      → "const" type IDENT "=" expr ";"
-  return_stmt     → "return" expr? ";"
-  if_stmt         → "if" "(" expr ")" block ("else" (if_stmt | block))?
-  while_stmt      → "while" "(" expr ")" block
-  for_stmt        → "for" "(" expr? ";" expr? ";" expr? ")" block
-  break_stmt      → "break" ";"
-  expr_stmt       → expr ";"
-
-  Precedência (1 = mais alta, conforme especificação):
-  1  unary:   ! + - ++ --        (prefixo)
-  2  power:   **                 (right-assoc)
-  3  mult:    * / %
-  4  add:     + -
-  5  cmp:     > >= < <= == !=
-  6  and:     &&
-  7  or:      ||
-  8  assign:  = += -= *= /= %=   (right-assoc, mais baixa)
-
-  postfix (maior que qualquer op): [ ] ( ) .
+Este módulo define:
+  - Os nós de AST (dataclasses)
+  - JSSASTVisitor: percorre a árvore ANTLR e constrói os nós de AST
+  - AstPrinter: impressão indentada da AST
+  - ParseError / LexError: exceções de erro
+  - parse(source): função de entrada pública
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Optional
-from lexer import TT, Token
+
+from antlr4 import CommonTokenStream, InputStream, Token
+from antlr4.error.ErrorListener import ErrorListener
+
+from JSSLexer import JSSLexer
+from JSSParser import JSSParser
+from JSSVisitor import JSSVisitor
 
 
 # ---------------------------------------------------------------------------
@@ -55,11 +32,9 @@ class Param:
     name: str
 
 
-# --- Declarações de topo ---
-
 @dataclass
 class Program:
-    decls: list   # list[FunctionDecl | ClassDecl | VarDecl | ConstDecl]
+    decls: list
 
 
 @dataclass
@@ -74,9 +49,9 @@ class FunctionDecl:
 @dataclass
 class ClassDecl:
     name: str
-    attrs: list          # list[VarDecl]
-    constructor: object  # Optional[ConstructorDecl]
-    methods: list        # list[MethodDecl]
+    attrs: list
+    constructor: object
+    methods: list
     line: int
 
 
@@ -97,8 +72,6 @@ class MethodDecl:
     line: int
 
 
-# --- Statements ---
-
 @dataclass
 class Block:
     stmts: list
@@ -109,7 +82,7 @@ class VarDecl:
     type: str
     array_size: Optional[int]
     name: str
-    init: object   # Optional[Expr]
+    init: object
     line: int
 
 
@@ -117,13 +90,13 @@ class VarDecl:
 class ConstDecl:
     type: str
     name: str
-    init: object   # Expr
+    init: object
     line: int
 
 
 @dataclass
 class ReturnStmt:
-    value: object  # Optional[Expr]
+    value: object
     line: int
 
 
@@ -131,7 +104,7 @@ class ReturnStmt:
 class IfStmt:
     condition: object
     then_block: "Block"
-    else_clause: object  # Block | IfStmt | None
+    else_clause: object
     line: int
 
 
@@ -144,9 +117,9 @@ class WhileStmt:
 
 @dataclass
 class ForStmt:
-    init: object       # Optional[Expr]
-    condition: object  # Optional[Expr]
-    update: object     # Optional[Expr]
+    init: object
+    condition: object
+    update: object
     body: "Block"
     line: int
 
@@ -162,11 +135,9 @@ class ExprStmt:
     line: int
 
 
-# --- Expressões ---
-
 @dataclass
 class Assign:
-    target: object  # Ident | Subscript | Attr
+    target: object
     op: str
     value: object
     line: int
@@ -182,7 +153,7 @@ class BinOp:
 
 @dataclass
 class UnaryOp:
-    op: str       # !, -, +, ++, -- (todos prefixo)
+    op: str
     operand: object
     line: int
 
@@ -264,8 +235,14 @@ class NullLit:
 
 
 # ---------------------------------------------------------------------------
-# Erro sintático
+# Exceções
 # ---------------------------------------------------------------------------
+
+class LexError(Exception):
+    def __init__(self, msg: str, line: int):
+        super().__init__(f"Erro léxico na linha {line}: {msg}")
+        self.line = line
+
 
 class ParseError(Exception):
     def __init__(self, msg: str, line: int):
@@ -274,459 +251,335 @@ class ParseError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Conjuntos auxiliares
+# Error listeners — capturam erros do ANTLR e lançam nossas exceções
 # ---------------------------------------------------------------------------
 
-_TYPE_TOKENS = frozenset({TT.INT, TT.REAL, TT.STR, TT.BOOL, TT.VOID})
+class _LexErrorListener(ErrorListener):
+    def syntaxError(self, recognizer, offendingSymbol, line, column, msg, e):
+        raise LexError(f"caractere não reconhecido na coluna {column + 1}", line)
 
-_ASSIGN_OPS = frozenset({
-    TT.ASSIGN, TT.PLUS_ASSIGN, TT.MINUS_ASSIGN,
-    TT.STAR_ASSIGN, TT.SLASH_ASSIGN, TT.PERCENT_ASSIGN,
-})
 
-_CMP_OPS = frozenset({TT.LT, TT.LTE, TT.GT, TT.GTE, TT.EQ, TT.NEQ})
+class _ParseErrorListener(ErrorListener):
+    def syntaxError(self, recognizer, offendingSymbol, line, column, msg, e):
+        symbol = getattr(offendingSymbol, "text", "?")
+        raise ParseError(f"encontrado {symbol!r} na coluna {column + 1}", line)
 
 
 # ---------------------------------------------------------------------------
-# Parser
+# Visitor: converte árvore ANTLR → nós de AST
 # ---------------------------------------------------------------------------
 
-class Parser:
-    """
-    Analisador sintático descendente recursivo para JSS.
+def _parse_str(raw: str) -> str:
+    inner = raw[1:-1]
+    return bytes(inner, "utf-8").decode("unicode_escape")
 
-    Uso:
-        ast = Parser(tokens).parse()   # tokens de Lexer.tokenize()
-    """
 
-    def __init__(self, tokens: list[Token]):
-        self._tokens = tokens
-        self._pos = 0
+class JSSASTVisitor(JSSVisitor):
 
-    # ── helpers ─────────────────────────────────────────────────────────────
+    # ── programa ──────────────────────────────────────────────────────────────
 
-    def _peek(self, offset: int = 0) -> Token:
-        idx = min(self._pos + offset, len(self._tokens) - 1)
-        return self._tokens[idx]
-
-    def _peek_type(self, offset: int = 0) -> TT:
-        return self._peek(offset).type
-
-    def _advance(self) -> Token:
-        tok = self._tokens[self._pos]
-        if tok.type != TT.EOF:
-            self._pos += 1
-        return tok
-
-    def _check(self, *types: TT) -> bool:
-        return self._peek_type() in types
-
-    def _match(self, *types: TT) -> Optional[Token]:
-        if self._peek_type() in types:
-            return self._advance()
-        return None
-
-    def _expect(self, tt: TT, label: str = "") -> Token:
-        if self._peek_type() == tt:
-            return self._advance()
-        tok = self._peek()
-        want = label or tt.name
-        raise ParseError(f"esperado '{want}', encontrado {tok.value!r}", tok.line)
-
-    # ── programa ─────────────────────────────────────────────────────────────
-
-    def parse(self) -> Program:
+    def visitProgram(self, ctx: JSSParser.ProgramContext):
         decls = []
-        while not self._check(TT.EOF):
-            decls.extend(self._top_decl())
-        self._expect(TT.EOF, "EOF")
+        for td in ctx.topDecl():
+            result = self.visit(td)
+            if isinstance(result, list):
+                decls.extend(result)
+            else:
+                decls.append(result)
         return Program(decls)
 
-    def _top_decl(self) -> list:
-        tt = self._peek_type()
-        if tt == TT.FUNCTION:
-            return [self._function_decl()]
-        if tt == TT.CLASS:
-            return [self._class_decl()]
-        if tt == TT.LET:
-            return self._var_decl()
-        if tt == TT.CONST:
-            return [self._const_decl()]
-        tok = self._peek()
-        raise ParseError(f"declaração inesperada: {tok.value!r}", tok.line)
+    def visitTopDecl(self, ctx: JSSParser.TopDeclContext):
+        return self.visitChildren(ctx)
+
+    # ── tipos ─────────────────────────────────────────────────────────────────
+
+    def visitType(self, ctx: JSSParser.TypeContext):
+        return ctx.getText()
 
     # ── funções ───────────────────────────────────────────────────────────────
 
-    def _function_decl(self) -> FunctionDecl:
-        tok = self._advance()   # consume 'function'
-        ret_type = self._type()
-        name_tok = self._expect(TT.IDENT, "nome da função")
-        self._expect(TT.LPAREN, "(")
-        params = self._params()
-        self._expect(TT.RPAREN, ")")
-        body = self._block()
-        return FunctionDecl(ret_type, name_tok.value, params, body, tok.line)
+    def visitFunctionDecl(self, ctx: JSSParser.FunctionDeclContext):
+        ret_type = self.visit(ctx.type_())
+        name = ctx.IDENT().getText()
+        params = self.visit(ctx.params())
+        body = self.visit(ctx.block())
+        line = ctx.start.line
+        return FunctionDecl(ret_type, name, params, body, line)
 
-    def _type(self) -> str:
-        tok = self._peek()
-        if tok.type in _TYPE_TOKENS:
-            self._advance()
-            return tok.value
-        raise ParseError(
-            f"esperado tipo (int, real, str, bool, void), encontrado {tok.value!r}",
-            tok.line,
-        )
+    def visitParams(self, ctx: JSSParser.ParamsContext):
+        return [self.visit(p) for p in ctx.param()]
 
-    def _params(self) -> list[Param]:
-        if self._check(TT.RPAREN):
-            return []
-        params = [self._param()]
-        while self._match(TT.COMMA):
-            params.append(self._param())
-        return params
-
-    def _param(self) -> Param:
-        type_ = self._type()
-        name_tok = self._expect(TT.IDENT, "nome do parâmetro")
-        return Param(type_, name_tok.value)
+    def visitParam(self, ctx: JSSParser.ParamContext):
+        return Param(self.visit(ctx.type_()), ctx.IDENT().getText())
 
     # ── classes ───────────────────────────────────────────────────────────────
 
-    def _class_decl(self) -> ClassDecl:
-        tok = self._advance()   # consume 'class'
-        name_tok = self._expect(TT.IDENT, "nome da classe")
-        self._expect(TT.LBRACE, "{")
+    def visitClassDecl(self, ctx: JSSParser.ClassDeclContext):
+        name = ctx.IDENT().getText()
+        attrs, ctor, methods = [], None, []
+        for m in ctx.classMember():
+            result = self.visit(m)
+            if isinstance(result, VarDecl):
+                attrs.append(result)
+            elif isinstance(result, ConstructorDecl):
+                ctor = result
+            elif isinstance(result, MethodDecl):
+                methods.append(result)
+        return ClassDecl(name, attrs, ctor, methods, ctx.start.line)
 
-        attrs: list[VarDecl] = []
-        constructor = None
-        methods: list[MethodDecl] = []
+    def visitClassMember(self, ctx: JSSParser.ClassMemberContext):
+        return self.visitChildren(ctx)
 
-        while not self._check(TT.RBRACE, TT.EOF):
-            p0 = self._peek(0)
-            p1 = self._peek(1)
+    def visitConstructorDecl(self, ctx: JSSParser.ConstructorDeclContext):
+        class_name = ctx.IDENT().getText()
+        params = self.visit(ctx.params())
+        body = self.visit(ctx.block())
+        return ConstructorDecl(class_name, params, body, ctx.start.line)
 
-            # Constructor: ClassName constructor(params) block
-            if (p0.type == TT.IDENT
-                    and p1.type == TT.IDENT
-                    and p1.value == "constructor"):
-                constructor = self._constructor_decl()
+    def visitMethodDecl(self, ctx: JSSParser.MethodDeclContext):
+        ret_type = self.visit(ctx.type_())
+        name = ctx.IDENT().getText()
+        params = self.visit(ctx.params())
+        body = self.visit(ctx.block())
+        return MethodDecl(ret_type, name, params, body, ctx.start.line)
 
-            # Attribute ou Method: type IDENT ; | type IDENT (
-            elif p0.type in _TYPE_TOKENS:
-                type_ = self._type()
-                member_name_tok = self._expect(TT.IDENT, "nome do membro")
-                if self._check(TT.LPAREN):
-                    # Método
-                    self._expect(TT.LPAREN, "(")
-                    mparams = self._params()
-                    self._expect(TT.RPAREN, ")")
-                    body = self._block()
-                    methods.append(MethodDecl(type_, member_name_tok.value, mparams, body, member_name_tok.line))
-                else:
-                    # Atributo
-                    self._expect(TT.SEMICOLON, ";")
-                    attrs.append(VarDecl(type_, None, member_name_tok.value, None, member_name_tok.line))
+    def visitAttrDecl(self, ctx: JSSParser.AttrDeclContext):
+        type_ = self.visit(ctx.type_())
+        name = ctx.IDENT().getText()
+        return VarDecl(type_, None, name, None, ctx.start.line)
 
-            else:
-                raise ParseError(f"membro de classe inesperado: {p0.value!r}", p0.line)
+    # ── bloco ─────────────────────────────────────────────────────────────────
 
-        self._expect(TT.RBRACE, "}")
-        return ClassDecl(name_tok.value, attrs, constructor, methods, tok.line)
-
-    def _constructor_decl(self) -> ConstructorDecl:
-        class_name_tok = self._advance()  # IDENT (nome da classe)
-        self._advance()                   # IDENT "constructor"
-        self._expect(TT.LPAREN, "(")
-        params = self._params()
-        self._expect(TT.RPAREN, ")")
-        body = self._block()
-        return ConstructorDecl(class_name_tok.value, params, body, class_name_tok.line)
-
-    # ── bloco e statements ───────────────────────────────────────────────────
-
-    def _block(self) -> Block:
-        self._expect(TT.LBRACE, "{")
+    def visitBlock(self, ctx: JSSParser.BlockContext):
         stmts = []
-        while not self._check(TT.RBRACE, TT.EOF):
-            for s in self._statement():
-                stmts.append(s)
-        self._expect(TT.RBRACE, "}")
+        for s in ctx.statement():
+            result = self.visit(s)
+            if isinstance(result, list):
+                stmts.extend(result)
+            else:
+                stmts.append(result)
         return Block(stmts)
 
-    def _statement(self) -> list:
-        tt = self._peek_type()
-        if tt == TT.LET:    return self._var_decl()
-        if tt == TT.CONST:  return [self._const_decl()]
-        if tt == TT.RETURN: return [self._return_stmt()]
-        if tt == TT.IF:     return [self._if_stmt()]
-        if tt == TT.WHILE:  return [self._while_stmt()]
-        if tt == TT.FOR:    return [self._for_stmt()]
-        if tt == TT.BREAK:
-            tok = self._advance()
-            self._expect(TT.SEMICOLON, ";")
-            return [BreakStmt(tok.line)]
-        return [self._expr_stmt()]
+    def visitStatement(self, ctx: JSSParser.StatementContext):
+        return self.visitChildren(ctx)
 
-    def _var_decl(self) -> list[VarDecl]:
-        tok = self._advance()   # consume 'let'
-        type_ = self._type()
+    # ── var / const ───────────────────────────────────────────────────────────
 
-        # Dimensão de array: let int[3] arr
-        array_size = None
-        if self._match(TT.LBRACKET):
-            size_tok = self._expect(TT.INT_LIT, "tamanho do array")
-            array_size = size_tok.value
-            self._expect(TT.RBRACKET, "]")
+    def visitVarDecl(self, ctx: JSSParser.VarDeclContext):
+        return self._build_var_decls(ctx)
 
-        # Primeiro declarador
-        decls = [self._declarator(type_, array_size, tok.line)]
+    def visitVarDeclNoSemi(self, ctx: JSSParser.VarDeclNoSemiContext):
+        return self._build_var_decls(ctx)
 
-        # Declaradores adicionais: let int a, b, c;
-        while self._match(TT.COMMA):
-            decls.append(self._declarator(type_, array_size, self._peek().line))
+    def _build_var_decls(self, ctx):
+        type_ = self.visit(ctx.type_())
+        array_size = int(ctx.INT_LIT().getText()) if ctx.INT_LIT() else None
+        line = ctx.start.line
+        return [self._visit_declarator(d, type_, array_size, line)
+                for d in ctx.declarator()]
 
-        self._expect(TT.SEMICOLON, ";")
-        return decls
+    def _visit_declarator(self, ctx: JSSParser.DeclaratorContext, type_, array_size, line):
+        name = ctx.IDENT().getText()
+        init = self.visit(ctx.expr()) if ctx.expr() else None
+        return VarDecl(type_, array_size, name, init, line)
 
-    def _declarator(self, type_: str, array_size: Optional[int], line: int) -> VarDecl:
-        name_tok = self._expect(TT.IDENT, "nome da variável")
-        init = None
-        if self._match(TT.ASSIGN):
-            init = self._expr()
-        return VarDecl(type_, array_size, name_tok.value, init, line)
+    def visitConstDecl(self, ctx: JSSParser.ConstDeclContext):
+        type_ = self.visit(ctx.type_())
+        name = ctx.IDENT().getText()
+        init = self.visit(ctx.expr())
+        return ConstDecl(type_, name, init, ctx.start.line)
 
-    def _const_decl(self) -> ConstDecl:
-        tok = self._advance()   # consume 'const'
-        type_ = self._type()
-        name_tok = self._expect(TT.IDENT, "nome da constante")
-        self._expect(TT.ASSIGN, "=")
-        init = self._expr()
-        self._expect(TT.SEMICOLON, ";")
-        return ConstDecl(type_, name_tok.value, init, tok.line)
+    # ── statements ────────────────────────────────────────────────────────────
 
-    def _return_stmt(self) -> ReturnStmt:
-        tok = self._advance()   # consume 'return'
-        value = None
-        if not self._check(TT.SEMICOLON):
-            value = self._expr()
-        self._expect(TT.SEMICOLON, ";")
-        return ReturnStmt(value, tok.line)
+    def visitReturnStmt(self, ctx: JSSParser.ReturnStmtContext):
+        value = self.visit(ctx.expr()) if ctx.expr() else None
+        return ReturnStmt(value, ctx.start.line)
 
-    def _if_stmt(self) -> IfStmt:
-        tok = self._advance()   # consume 'if'
-        self._expect(TT.LPAREN, "(")
-        cond = self._expr()
-        self._expect(TT.RPAREN, ")")
-        then_b = self._block()
-        else_clause = None
-        if self._match(TT.ELSE):
-            # else if: encadeia direto sem bloco extra
-            if self._check(TT.IF):
-                else_clause = self._if_stmt()
-            else:
-                else_clause = self._block()
-        return IfStmt(cond, then_b, else_clause, tok.line)
+    def visitIfStmt(self, ctx: JSSParser.IfStmtContext):
+        cond = self.visit(ctx.expr())
+        then_b = self.visit(ctx.block())
+        else_c = self.visit(ctx.elseClause()) if ctx.elseClause() else None
+        return IfStmt(cond, then_b, else_c, ctx.start.line)
 
-    def _while_stmt(self) -> WhileStmt:
-        tok = self._advance()   # consume 'while'
-        self._expect(TT.LPAREN, "(")
-        cond = self._expr()
-        self._expect(TT.RPAREN, ")")
-        body = self._block()
-        return WhileStmt(cond, body, tok.line)
+    def visitElseClause(self, ctx: JSSParser.ElseClauseContext):
+        return self.visitChildren(ctx)
 
-    def _for_stmt(self) -> ForStmt:
-        tok = self._advance()   # consume 'for'
-        self._expect(TT.LPAREN, "(")
+    def visitWhileStmt(self, ctx: JSSParser.WhileStmtContext):
+        cond = self.visit(ctx.expr())
+        body = self.visit(ctx.block())
+        return WhileStmt(cond, body, ctx.start.line)
 
-        init = None if self._check(TT.SEMICOLON) else self._expr()
-        self._expect(TT.SEMICOLON, ";")
+    def visitForStmt(self, ctx: JSSParser.ForStmtContext):
+        init = self.visit(ctx.forInit()) if ctx.forInit() else None
+        exprs = ctx.expr()
+        condition = self.visit(exprs[0]) if len(exprs) > 0 else None
+        update    = self.visit(exprs[1]) if len(exprs) > 1 else None
+        body = self.visit(ctx.block())
+        return ForStmt(init, condition, update, body, ctx.start.line)
 
-        condition = None if self._check(TT.SEMICOLON) else self._expr()
-        self._expect(TT.SEMICOLON, ";")
+    def visitForInit(self, ctx: JSSParser.ForInitContext):
+        return self.visitChildren(ctx)
 
-        update = None if self._check(TT.RPAREN) else self._expr()
-        self._expect(TT.RPAREN, ")")
+    def visitBreakStmt(self, ctx: JSSParser.BreakStmtContext):
+        return BreakStmt(ctx.start.line)
 
-        body = self._block()
-        return ForStmt(init, condition, update, body, tok.line)
+    def visitExprStmt(self, ctx: JSSParser.ExprStmtContext):
+        return ExprStmt(self.visit(ctx.expr()), ctx.start.line)
 
-    def _expr_stmt(self) -> ExprStmt:
-        tok = self._peek()
-        expr = self._expr()
-        self._expect(TT.SEMICOLON, ";")
-        return ExprStmt(expr, tok.line)
+    # ── expressões ────────────────────────────────────────────────────────────
 
-    # ── expressões (precedência crescente de baixo para cima) ───────────────
+    def visitExpr(self, ctx: JSSParser.ExprContext):
+        if ctx.assignOp():
+            target = self.visit(ctx.orExpr())
+            if not isinstance(target, (Ident, Subscript, Attr)):
+                raise ParseError("alvo de atribuição inválido", ctx.start.line)
+            op = ctx.assignOp().getText()
+            value = self.visit(ctx.expr())
+            return Assign(target, op, value, ctx.start.line)
+        return self.visit(ctx.orExpr())
 
-    def _expr(self):
-        return self._assignment()
+    def visitOrExpr(self, ctx: JSSParser.OrExprContext):
+        if ctx.orExpr():
+            left = self.visit(ctx.orExpr())
+            right = self.visit(ctx.andExpr())
+            return BinOp("||", left, right, ctx.start.line)
+        return self.visit(ctx.andExpr())
 
-    def _assignment(self):
-        left = self._or()
-        tok = self._peek()
-        if tok.type in _ASSIGN_OPS:
-            if not isinstance(left, (Ident, Subscript, Attr)):
-                raise ParseError("alvo de atribuição inválido", tok.line)
-            op = self._advance().value
-            right = self._assignment()   # right-assoc
-            return Assign(left, op, right, tok.line)
-        return left
+    def visitAndExpr(self, ctx: JSSParser.AndExprContext):
+        if ctx.andExpr():
+            left = self.visit(ctx.andExpr())
+            right = self.visit(ctx.cmpExpr())
+            return BinOp("&&", left, right, ctx.start.line)
+        return self.visit(ctx.cmpExpr())
 
-    def _or(self):
-        left = self._and()
-        while self._check(TT.OR):
-            op_tok = self._advance()
-            left = BinOp("||", left, self._and(), op_tok.line)
-        return left
+    def visitCmpExpr(self, ctx: JSSParser.CmpExprContext):
+        if ctx.cmpExpr():
+            left = self.visit(ctx.cmpExpr())
+            op = ctx.cmpOp().getText()
+            right = self.visit(ctx.addExpr())
+            return BinOp(op, left, right, ctx.start.line)
+        return self.visit(ctx.addExpr())
 
-    def _and(self):
-        left = self._comparison()
-        while self._check(TT.AND):
-            op_tok = self._advance()
-            left = BinOp("&&", left, self._comparison(), op_tok.line)
-        return left
+    def visitAddExpr(self, ctx: JSSParser.AddExprContext):
+        if ctx.addExpr():
+            left = self.visit(ctx.addExpr())
+            op = "+" if ctx.getChild(1).getText() == "+" else "-"
+            right = self.visit(ctx.mulExpr())
+            return BinOp(op, left, right, ctx.start.line)
+        return self.visit(ctx.mulExpr())
 
-    def _comparison(self):
-        # Nível 5: >, >=, <, <=, ==, != — mesma precedência (left-assoc)
-        left = self._additive()
-        while self._peek_type() in _CMP_OPS:
-            op_tok = self._advance()
-            left = BinOp(op_tok.value, left, self._additive(), op_tok.line)
-        return left
+    def visitMulExpr(self, ctx: JSSParser.MulExprContext):
+        if ctx.mulExpr():
+            left = self.visit(ctx.mulExpr())
+            op = ctx.getChild(1).getText()
+            right = self.visit(ctx.powExpr())
+            return BinOp(op, left, right, ctx.start.line)
+        return self.visit(ctx.powExpr())
 
-    def _additive(self):
-        left = self._multiplicative()
-        while self._check(TT.PLUS, TT.MINUS):
-            op_tok = self._advance()
-            left = BinOp(op_tok.value, left, self._multiplicative(), op_tok.line)
-        return left
+    def visitPowExpr(self, ctx: JSSParser.PowExprContext):
+        if ctx.getChildCount() == 3:
+            left = self.visit(ctx.unaryExpr())
+            right = self.visit(ctx.powExpr())
+            return BinOp("**", left, right, ctx.start.line)
+        return self.visit(ctx.unaryExpr())
 
-    def _multiplicative(self):
-        left = self._power()
-        while self._check(TT.STAR, TT.SLASH, TT.PERCENT):
-            op_tok = self._advance()
-            left = BinOp(op_tok.value, left, self._power(), op_tok.line)
-        return left
+    def visitUnaryExpr(self, ctx: JSSParser.UnaryExprContext):
+        if ctx.postfixExpr():
+            return self.visit(ctx.postfixExpr())
+        op = ctx.getChild(0).getText()
+        operand = self.visit(ctx.unaryExpr())
+        return UnaryOp(op, operand, ctx.start.line)
 
-    def _power(self):
-        base = self._unary()
-        if self._check(TT.POWER):
-            op_tok = self._advance()
-            return BinOp("**", base, self._power(), op_tok.line)   # right-assoc
-        return base
+    def visitPostfixExpr(self, ctx: JSSParser.PostfixExprContext):
+        if ctx.primary():
+            return self.visit(ctx.primary())
+        obj = self.visit(ctx.postfixExpr())
+        line = ctx.start.line
+        # subscript: postfixExpr '[' expr ']'
+        if ctx.getChildCount() == 4 and ctx.getChild(1).getText() == "[":
+            idx = self.visit(ctx.expr())
+            return Subscript(obj, idx, line)
+        # call: postfixExpr '(' argList ')'
+        if ctx.argList() is not None:
+            args = self.visit(ctx.argList())
+            return Call(obj, args, line)
+        # attr: postfixExpr '.' IDENT
+        name = ctx.IDENT().getText()
+        return Attr(obj, name, line)
 
-    def _unary(self):
-        # Nível 1: !, +, -, ++, -- (todos PREFIXO conforme especificação)
-        tok = self._peek()
-        if tok.type in (TT.BANG, TT.MINUS, TT.PLUS, TT.INC, TT.DEC):
-            self._advance()
-            return UnaryOp(tok.value, self._unary(), tok.line)
-        return self._postfix()
+    def visitArgList(self, ctx: JSSParser.ArgListContext):
+        return [self.visit(e) for e in ctx.expr()]
 
-    def _postfix(self):
-        expr = self._primary()
-        while True:
-            tok = self._peek()
-            if tok.type == TT.LBRACKET:
-                self._advance()
-                idx = self._expr()
-                self._expect(TT.RBRACKET, "]")
-                expr = Subscript(expr, idx, tok.line)
-            elif tok.type == TT.LPAREN:
-                self._advance()
-                args = self._args()
-                self._expect(TT.RPAREN, ")")
-                expr = Call(expr, args, tok.line)
-            elif tok.type == TT.DOT:
-                self._advance()
-                attr_tok = self._expect(TT.IDENT, "nome do membro")
-                expr = Attr(expr, attr_tok.value, tok.line)
-            else:
-                break
-        return expr
+    def visitPrimary(self, ctx: JSSParser.PrimaryContext):
+        line = ctx.start.line
+        first = ctx.getChild(0).getText()
 
-    def _args(self) -> list:
-        if self._check(TT.RPAREN):
-            return []
-        args = [self._expr()]
-        while self._match(TT.COMMA):
-            args.append(self._expr())
-        return args
-
-    def _primary(self):
-        tok = self._peek()
-
-        if tok.type == TT.INT_LIT:
-            return IntLit(self._advance().value, tok.line)
-        if tok.type == TT.REAL_LIT:
-            return RealLit(self._advance().value, tok.line)
-        if tok.type == TT.STR_LIT:
-            return StrLit(self._advance().value, tok.line)
-        if tok.type == TT.BOOL_LIT:
-            return BoolLit(self._advance().value, tok.line)
-        if tok.type == TT.NULL:
-            self._advance()
-            return NullLit(tok.line)
-        if tok.type in (TT.IDENT, TT.THIS):
-            return Ident(self._advance().value, tok.line)
-
-        # new ClassName(args)
-        if tok.type == TT.NEW:
-            self._advance()
-            name_tok = self._expect(TT.IDENT, "nome da classe")
-            self._expect(TT.LPAREN, "(")
-            args = self._args()
-            self._expect(TT.RPAREN, ")")
-            return NewExpr(name_tok.value, args, tok.line)
-
-        # cast: int(expr), real(expr), str(expr), bool(expr)
-        if tok.type in (TT.INT, TT.REAL, TT.STR, TT.BOOL):
-            type_name = self._advance().value
-            self._expect(TT.LPAREN, "(")
-            inner = self._expr()
-            self._expect(TT.RPAREN, ")")
-            return Cast(type_name, inner, tok.line)
-
-        # agrupamento: (expr)
-        if tok.type == TT.LPAREN:
-            self._advance()
-            inner = self._expr()
-            self._expect(TT.RPAREN, ")")
-            return inner
-
-        # array literal: [expr, ...]
-        if tok.type == TT.LBRACKET:
-            self._advance()
-            elements = []
-            if not self._check(TT.RBRACKET):
-                elements.append(self._expr())
-                while self._match(TT.COMMA):
-                    elements.append(self._expr())
-            self._expect(TT.RBRACKET, "]")
-            return ArrayLit(elements, tok.line)
-
-        raise ParseError(f"expressão inesperada: {tok.value!r}", tok.line)
+        if ctx.INT_LIT():
+            return IntLit(int(ctx.INT_LIT().getText()), line)
+        if ctx.REAL_LIT():
+            return RealLit(float(ctx.REAL_LIT().getText()), line)
+        if ctx.STR_LIT():
+            return StrLit(_parse_str(ctx.STR_LIT().getText()), line)
+        if first == "true":
+            return BoolLit(True, line)
+        if first == "false":
+            return BoolLit(False, line)
+        if first == "null":
+            return NullLit(line)
+        if first == "this":
+            return Ident("this", line)
+        if first == "new":
+            name = ctx.IDENT().getText()
+            args = self.visit(ctx.argList())
+            return NewExpr(name, args, line)
+        # cast: type '(' expr ')'  — primeiro filho é um tipo primitivo
+        if ctx.type_():
+            type_ = self.visit(ctx.type_())
+            return Cast(type_, self.visit(ctx.expr()[0]), line)
+        # agrupamento: '(' expr ')'
+        if first == "(":
+            return self.visit(ctx.expr()[0])
+        # array literal: '[' expr* ']'
+        if first == "[":
+            return ArrayLit([self.visit(e) for e in ctx.expr()], line)
+        # identificador
+        return Ident(ctx.IDENT().getText(), line)
 
 
 # ---------------------------------------------------------------------------
-# Impressora de AST (usa match de Python 3.10+)
+# Função pública de parse
+# ---------------------------------------------------------------------------
+
+def parse(source: str) -> Program:
+    input_stream = InputStream(source)
+
+    lexer = JSSLexer(input_stream)
+    lexer.removeErrorListeners()
+    lexer.addErrorListener(_LexErrorListener())
+
+    token_stream = CommonTokenStream(lexer)
+
+    parser = JSSParser(token_stream)
+    parser.removeErrorListeners()
+    parser.addErrorListener(_ParseErrorListener())
+
+    tree = parser.program()
+    return JSSASTVisitor().visit(tree)
+
+
+# ---------------------------------------------------------------------------
+# Impressora de AST
 # ---------------------------------------------------------------------------
 
 class AstPrinter:
-    """Imprime a AST em formato indentado legível."""
-
     def __init__(self):
         self._depth = 0
 
     def _w(self, text: str):
         print("  " * self._depth + text)
 
-    def _dn(self):
-        self._depth += 1
-
-    def _up(self):
-        self._depth -= 1
+    def _dn(self): self._depth += 1
+    def _up(self): self._depth -= 1
 
     def print(self, node):  # noqa: A003
         match node:
@@ -806,7 +659,14 @@ class AstPrinter:
                 self._w(f"ForStmt  [L{l}]")
                 self._dn()
                 if i is not None:
-                    self._w("init:"); self._dn(); self.print(i); self._up()
+                    self._w("init:")
+                    self._dn()
+                    if isinstance(i, list):
+                        for v in i:
+                            self.print(v)
+                    else:
+                        self.print(i)
+                    self._up()
                 if c is not None:
                     self._w("condition:"); self._dn(); self.print(c); self._up()
                 if u is not None:

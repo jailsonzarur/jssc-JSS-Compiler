@@ -11,8 +11,7 @@ Flags opcionais:
 """
 
 import sys
-from lexer import Lexer, LexError
-from parser import Parser, ParseError, AstPrinter
+from parser import parse, ParseError, LexError, AstPrinter
 
 
 def main():
@@ -21,7 +20,6 @@ def main():
     flag_ast    = "--ast"    in args
     src_args    = [a for a in args if not a.startswith("--")]
 
-    # Leitura da fonte
     if src_args:
         try:
             with open(src_args[0], "r", encoding="utf-8") as f:
@@ -32,23 +30,25 @@ def main():
     else:
         source = sys.stdin.read()
 
-    # ── Análise léxica ───────────────────────────────────────────────────────
-    try:
-        tokens = Lexer(source).tokenize()
-    except LexError as e:
-        print(str(e))
-        sys.exit(1)
-
     if flag_tokens:
-        for tok in tokens:
-            print(tok)
+        from antlr4 import CommonTokenStream, InputStream
+        from JSSLexer import JSSLexer
+        input_stream = InputStream(source)
+        lexer = JSSLexer(input_stream)
+        stream = CommonTokenStream(lexer)
+        try:
+            stream.fill()
+        except Exception as e:
+            print(f"Erro léxico: {e}")
+            sys.exit(1)
+        for tok in stream.tokens[:-1]:  # exclui EOF
+            print(f"Token({lexer.symbolicNames[tok.type]}, {tok.text!r}, line={tok.line})")
         print("\nAnálise léxica concluída sem erros.")
         return
 
-    # ── Análise sintática ────────────────────────────────────────────────────
     try:
-        ast = Parser(tokens).parse()
-    except ParseError as e:
+        ast = parse(source)
+    except (LexError, ParseError) as e:
         print(str(e))
         sys.exit(1)
 
